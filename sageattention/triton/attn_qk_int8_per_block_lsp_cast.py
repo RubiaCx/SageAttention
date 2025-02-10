@@ -18,6 +18,7 @@ import torch, math
 import triton
 import triton.language as tl
 
+#! triton 中计算 log-sum-exp 是在 fp32 精度下进行的
 @triton.jit
 def _attn_fwd_inner(acc, l_i, m_i, q, q_scale, kv_len,
                     K_ptrs, K_scale_ptr, V_ptrs, stride_kn, stride_vn, 
@@ -27,25 +28,28 @@ def _attn_fwd_inner(acc, l_i, m_i, q, q_scale, kv_len,
                     ):
     lo, hi = 0, kv_len
     for start_n in range(lo, hi, BLOCK_N):
+        # Attention(Q,K,V) = softmax(QK^T/sqrt(d))V
         start_n = tl.multiple_of(start_n, BLOCK_N)
         k_mask = offs_n[None, :] < (kv_len - start_n)   
         k = tl.load(K_ptrs, mask = k_mask)
         k_scale = tl.load(K_scale_ptr)
+        # QK^T，即公式中的 S_i^j
         qk = tl.dot(q, k).to(tl.float32) * q_scale * k_scale 
-        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        # rows_sum(exp(S_i^j - m_i^j)
+        m_ij = tl.maximum(m_i, tl.max(qk, 1)) # 减去当前块的最大值，归一化
         qk = qk - m_ij[:, None]
-        p = tl.math.exp2(qk)
-        l_ij = tl.sum(p, 1)
-        
+        p = tl.math.exp2(qk) 
+        l_ij = tl.sum(p, 1) 
+        # exp(m_i^j-1 - m_i^j) 对于上一块累积的 l_i，按照当前块的尺度修正：
         alpha = tl.math.exp2(m_i - m_ij)
+        #! l_i^j = exp(m_i^j-1 - m_i^j) + rows_sum(exp(S_i^j - m_i^j)
         l_i = l_i * alpha + l_ij
-        
+
         acc = acc * alpha[:, None]
-        
         v = tl.load(V_ptrs, mask = offs_n[:, None] < (kv_len - start_n))
         p = p.to(tl.float16)
-        
-        acc += tl.dot(p, v, out_dtype=tl.float16)   
+        acc += tl.dot(p, v, out_dtype=tl.float16)  
+         
         m_i = m_ij
         K_ptrs += BLOCK_N * stride_kn
         K_scale_ptr += 1
@@ -98,8 +102,10 @@ def _attn_fwd(Q, K, V, Q_scale, K_scale, Out, Lse,
     tl.store(O_block_ptr, acc.to(Out.type.element_ty), mask = (offs_m[:, None] < qo_len))
 
     if RETURN_LSE:
-        lse_ptrs = Lse + (off_z * qo_len * H + off_h * qo_len) + offs_m
+        lse_ptrs = Lse + (off_z * qo_len * H + off_h * qo_len) + offs_m  #!
         l_i = tl.log2(l_i) + m_i
+        # 将最终的 LSE 结果 cast 为 FP16 后再存储
+        l_i = tl.cast(l_i, tl.float16)
         tl.store(lse_ptrs, l_i, mask = (offs_m < qo_len))
 
 def forward(q, k, v, q_scale, k_scale, tensor_layout="HND", output_dtype=torch.float16, return_lse=False):

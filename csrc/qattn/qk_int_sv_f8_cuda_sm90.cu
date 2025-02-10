@@ -290,7 +290,8 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
     }
 
     // convert RS to float
-    float RS_f32[num_tiles_q][num_tiles_k][8];
+    // 存储QK^T
+    float RS_f32[num_tiles_q][num_tiles_k][8]; 
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
     {
@@ -304,10 +305,11 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
         }
       }
     }
-
+    //!
     update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, false, true, false>(RS_f32, RO, m, d, sm_scale);
 
-    // accumulate d on thread basis
+    // accumulate d on thread basis 
+    // 累积d
 #pragma unroll
     for (uint32_t fq = 0; fq < num_tiles_q; fq++)
     {
@@ -435,7 +437,7 @@ __global__ void qk_int8_sv_f8_attn_kernel(const __grid_constant__ CUtensorMap te
         }
       }
     }
-
+    //!
     update_mdo<num_tiles_q, num_tiles_k, num_tiles_v, false, true, false>(RS_f32, RO, m, d, sm_scale);
 
     // accumulate d on thread basis

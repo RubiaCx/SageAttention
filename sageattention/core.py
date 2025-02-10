@@ -19,7 +19,7 @@ import torch.nn.functional as F
 
 from .triton.quant_per_block import per_block_int8 as per_block_int8_triton
 from .triton.quant_per_block_varlen import per_block_int8 as per_block_int8_varlen_triton
-from .triton.attn_qk_int8_per_block import forward as attn_false
+from .triton.attn_qk_int8_per_block_lse_fp16 import forward as attn_false
 from .triton.attn_qk_int8_per_block_causal import forward as attn_true
 from .triton.attn_qk_int8_block_varlen import forward as attn_false_varlen
 from .triton.attn_qk_int8_per_block_causal_varlen import forward as attn_true_varlen
@@ -67,6 +67,7 @@ def sageattn(
     is_causal: bool = False,
     sm_scale: Optional[float] = None,
     return_lse: bool = False,
+    lse_dtype: torch.dtype = torch.float32,
     **kwargs: Any,
 ):
     """
@@ -126,7 +127,7 @@ def sageattn(
     arch = get_cuda_arch_versions()[q.device.index]
     if arch == "sm80":
         return sageattn_qk_int8_pv_fp16_cuda(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32")
-    elif arch == "sm86":
+    elif arch == "sm86": #TODO 将 torch dtype 映射到 Triton 类型
         return sageattn_qk_int8_pv_fp16_triton(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse)
     elif arch == "sm89":
         return sageattn_qk_int8_pv_fp8_cuda(q, k, v, tensor_layout=tensor_layout, is_causal=is_causal, sm_scale=sm_scale, return_lse=return_lse, pv_accum_dtype="fp32+fp32")
@@ -135,13 +136,14 @@ def sageattn(
     else:
         raise ValueError(f"Unsupported CUDA architecture: {arch}")
 
+# 
 @torch.compiler.disable
 def sageattn_qk_int8_pv_fp16_triton(
     q: torch.Tensor, 
     k: torch.Tensor, 
     v: torch.Tensor, 
     tensor_layout: str = "HND",
-    quantization_backend: str = "triton",
+    quantization_backend: str = "triton", 
     is_causal: bool =False, 
     sm_scale: Optional[float] = None, 
     smooth_k: bool = True,
@@ -211,7 +213,6 @@ def sageattn_qk_int8_pv_fp16_triton(
     - All tensors must be on the same cuda device.
     - `smooth_k` will introduce slight overhead but will improve the accuracy under most circumstances.
     """
-
     dtype = q.dtype
     assert q.is_cuda, "Input tensors must be on cuda."
     assert dtype in [torch.float16, torch.bfloat16], "Input tensors must be in dtype of torch.float16 or torch.bfloat16"
@@ -266,9 +267,10 @@ def sageattn_qk_int8_pv_fp16_triton(
         q_int8, q_scale, k_int8, k_scale = per_block_int8_cuda(q, k, km=km, sm_scale=sm_scale, tensor_layout=tensor_layout)
     else:
         raise ValueError(f"Unsupported quantization backend: {quantization_backend}")
-    if is_causal:
+    
+    if is_causal: # attn_qk_int8_per_block_causal.py
         o, lse = attn_true(q_int8, k_int8, v, q_scale, k_scale, tensor_layout=tensor_layout, output_dtype=dtype, return_lse=return_lse)
-    else:
+    else:         # attn_qk_int8_per_block.py
         o, lse = attn_false(q_int8, k_int8, v, q_scale, k_scale, tensor_layout=tensor_layout, output_dtype=dtype, return_lse=return_lse)
 
     o = o[..., :head_dim_og]
@@ -395,6 +397,7 @@ def sageattn_varlen(
 
     return o
 
+# sm80
 @torch.compiler.disable
 def sageattn_qk_int8_pv_fp16_cuda(
     q: torch.Tensor, 
@@ -890,7 +893,7 @@ def sageattn_qk_int8_pv_fp8_cuda_sm90(
 
     if pv_accum_dtype == "fp32":
         raise NotImplementedError("Please use pv_accum_dtype='fp32+fp32' for sm90.")
-        lse = _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
+        # lse = _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
     elif pv_accum_dtype == "fp32+fp32":
         lse = _qattn_sm90.qk_int8_sv_f8_accum_f32_fuse_v_scale_attn_inst_buf(q_int8, k_int8, v_fp8, o, q_scale, k_scale, v_scale, _tensor_layout, _is_caual, _qk_quant_gran, sm_scale, _return_lse)
 
