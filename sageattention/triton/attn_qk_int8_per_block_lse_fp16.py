@@ -1,19 +1,3 @@
-"""
-Copyright (c) 2024 by SageAttention team.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
 import torch, math
 import triton
 import triton.language as tl
@@ -27,30 +11,24 @@ def _attn_fwd_inner(acc, l_i, m_i, q, q_scale, kv_len,
                     ):
     lo, hi = 0, kv_len
     for start_n in range(lo, hi, BLOCK_N):
-        # Attention(Q,K,V) = softmax(QK^T/sqrt(d))V
         start_n = tl.multiple_of(start_n, BLOCK_N)
         k_mask = offs_n[None, :] < (kv_len - start_n)   
-        k = tl.load(K_ptrs, mask = k_mask)
+        k = tl.load(K_ptrs, mask=k_mask)
+        v = tl.load(V_ptrs, mask=offs_n[:, None] < (kv_len - start_n))
         k_scale = tl.load(K_scale_ptr)
-        # QK^T，即公式中的 S_i^j
+        #! fp16 -> fp32
         qk = tl.dot(q, k).to(tl.float32) * q_scale * k_scale 
-        # rows_sum(exp(S_i^j - m_i^j)
-        m_ij = tl.maximum(m_i, tl.max(qk, 1)) # 减去当前块的最大值，归一化
+        m_ij = tl.maximum(m_i, tl.max(qk, 1)) 
         qk = qk - m_ij[:, None]
         p = tl.math.exp2(qk) 
         l_ij = tl.sum(p, 1) 
-        # exp(m_i^j-1 - m_i^j) 对于上一块累积的 l_i，按照当前块的尺度修正：
         alpha = tl.math.exp2(m_i - m_ij)
-        # 显式转换为 fp16 确保类型一致
-        alpha = tl.cast(alpha, tl.float16)
-        #! l_i^j = exp(m_i^j-1 - m_i^j) + rows_sum(exp(S_i^j - m_i^j)
         l_i = l_i * alpha + l_ij
-
         acc = acc * alpha[:, None]
-        v = tl.load(V_ptrs, mask = offs_n[:, None] < (kv_len - start_n))
+        #! fp32 -> fp16 -> fp32
         p = p.to(tl.float16)
-        acc += tl.dot(p, v, out_dtype=tl.float16)  
-
+        acc += tl.dot(p, v, out_dtype=tl.float32)
+        
         m_i = m_ij
         K_ptrs += BLOCK_N * stride_kn
         K_scale_ptr += 1
@@ -88,23 +66,27 @@ def _attn_fwd(Q, K, V, Q_scale, K_scale, Out, Lse,
     V_ptrs = V + (off_z * stride_vz + (off_h // num_kv_groups) * stride_vh) + offs_n[:, None] * stride_vn + offs_k[None, :]
     O_block_ptr = Out + (off_z * stride_oz + off_h * stride_oh) + offs_m[:, None] * stride_on + offs_k[None, :]
     
-    m_i = tl.zeros([BLOCK_M], dtype=tl.float16) - float("inf")
-    l_i = tl.zeros([BLOCK_M], dtype=tl.float16) + 1.0
-    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float16)
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32) + 1.0
+    acc = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
     
-    q = tl.load(Q_ptrs, mask = offs_m[:, None] < qo_len)
+    q = tl.load(Q_ptrs, mask=offs_m[:, None] < qo_len)
     q_scale = tl.load(Q_scale_ptr)
+    
+    # Perform the attention calculation
     acc, l_i, m_i = _attn_fwd_inner(acc, l_i, m_i, q, q_scale, kv_len, K_ptrs, K_scale_ptr, V_ptrs, stride_kn, stride_vn,
                                     start_m,  
                                     BLOCK_M, HEAD_DIM, BLOCK_N,  
                                     4 - STAGE, offs_m, offs_n)
+    
+    # Normalize the accumulated results
     acc = acc / l_i[:, None]
-    tl.store(O_block_ptr, acc.to(Out.type.element_ty), mask = (offs_m[:, None] < qo_len))
+    tl.store(O_block_ptr, acc.to(Out.type.element_ty), mask=(offs_m[:, None] < qo_len))
 
     if RETURN_LSE:
-        lse_ptrs = Lse + (off_z * qo_len * H + off_h * qo_len) + offs_m  #!
-        l_i = tl.log2(l_i) + m_i
-        tl.store(lse_ptrs, l_i, mask = (offs_m < qo_len))
+        lse_ptrs = Lse + (off_z * qo_len * H + off_h * qo_len) + offs_m  
+        l_i = tl.log2(l_i) + m_i  # Log-Sum-Exp calculation
+        tl.store(lse_ptrs, l_i, mask=(offs_m < qo_len))
 
 def forward(q, k, v, q_scale, k_scale, tensor_layout="HND", output_dtype=torch.float16, return_lse=False):
     BLOCK_M = 128

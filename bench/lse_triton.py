@@ -20,8 +20,8 @@ head_dim = args.head_dim
 print(f"Benchmarking LSE precision differences: FP16 vs FP32 accumulation")
 print(f"batch_size: {batch_size}, num_heads: {num_heads}, head_dim: {head_dim}")
 
-seq_lens = [16]
-# seq_lens = [1024, 2048, 4096, 8192, 16384]
+# seq_lens = [16]
+seq_lens = [1024, 2048, 4096, 8192, 16384]
 
 for seq_len in seq_lens:
     #! 计算理论 FLOPs： 4 * num_heads * batch_size * head_dim * seq_len^2
@@ -38,14 +38,15 @@ for seq_len in seq_lens:
     
     for i in range(5):
         forward_fp16_lse(q, k, v, q_scale, k_scale, output_dtype=torch.float16, return_lse=True)
-        forward_fp32_lse(q, k, v, q_scale, k_scale, output_dtype=torch.float16, return_lse=True)
-        forward_lse_cast(q, k, v, q_scale, k_scale, output_dtype=torch.float16, return_lse=True)
     torch.cuda.synchronize()
 
     # Benchmark FP16 累加 lse 版本
     _, time_fp16 = benchmark_forward(forward_fp16_lse, q, k, v, q_scale, k_scale,
                                      output_dtype=torch.float16, return_lse=True,
                                      repeats=100, verbose=False, desc='FP16 LSE')
+    for i in range(5):
+        forward_fp32_lse(q, k, v, q_scale, k_scale, output_dtype=torch.float16, return_lse=True)
+    torch.cuda.synchronize()
     # Benchmark FP32 累加 lse 版本
     _, time_fp32 = benchmark_forward(forward_fp32_lse, q, k, v, q_scale, k_scale,
                                      output_dtype=torch.float16, return_lse=True,
@@ -67,11 +68,11 @@ for seq_len in seq_lens:
     # 打印一部分 lse 结果
     print(lse_fp16.shape)
 
-    print(lse_fp16)
-    print(lse_fp32)
-    print(lse_cast)
-    # 将两者转换为 float 进行比较
+    # print(lse_fp16)
+    # print(lse_fp32)
+    # print(lse_cast)
+    # # 将两者转换为 float 进行比较
     diff = (lse_fp16.float() - lse_fp32.float()).abs().mean().item()
-    print(f"Average absolute difference between LSE outputs: {diff:.6f}") 
-    diff = (lse_fp32.float() - lse_cast.float()).abs().mean().item()
-    print(f"Average absolute difference between LSE outputs: {diff:.6f}") 
+    print(f"Average absolute difference between FP16 and FP32: {diff:.6f}") 
+    # diff = (lse_fp32.float() - lse_cast.float()).abs().mean().item()
+    # print(f"Average absolute difference between LSE outputs: {diff:.6f}") 
