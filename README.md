@@ -29,6 +29,8 @@ Jintao Zhang, Jia Wei, Pengle Zhang, Xiaoming Xu, Haofeng Huang, Haoxu Wang, Kai
 
 
 ## Project Updates
+- [Here](https://github.com/jt-zhang/Sparse_SageAttention_API) provides a Sparse Attention API based on SageAttention V1, which can compute attention with any block sparse pattern very fast.
+- The code for SageAttention2++ is scheduled for release around June 20, while SageAttention3 is expected to be released around July 15.
 - [2025-05-02]: 🎉SageAttention2 and [SpargeAttn](https://github.com/thu-ml/SpargeAttn) are accepted by ICML 2025! 
 - [2025-02-25]: 🔥 We release [SpargeAttn](https://github.com/thu-ml/SpargeAttn), a sparse attention based on SageAttention2, which could acclerate any model without training.
 - [2025-02-15]: 🔥 The compilation code is updated to support RTX5090! On RTX5090, SageAttention reaches 560T, 2.7x faster than FlashAttention2!
@@ -68,10 +70,7 @@ Jintao Zhang, Jia Wei, Pengle Zhang, Xiaoming Xu, Haofeng Huang, Haoxu Wang, Kai
 
 ### Install Package
 
-For the stable Triton-only version, refer to [SageAttention-1](https://github.com/thu-ml/SageAttention/tree/sageattention-1) and install using pip:
-```
-pip install sageattention==1.0.6
-```
+For SageAttention V1 in Triton (slower than SageAttention V2/V2++/V3), refer to [SageAttention-1](https://github.com/thu-ml/SageAttention/tree/sageattention-1) and install using pip: `pip install sageattention==1.0.6`
 
 To use SageAttention 2.1.1, please **compile from source**:
 ```
